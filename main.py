@@ -258,15 +258,6 @@ class ElmarbyteApp:
         # tühi ruum
         tk.Frame(self.sidebar, bg=self.colors["sidebar"]).pack(fill="both", expand=True)
 
-        # jaluse tekst
-        tk.Label(
-            self.sidebar,
-            text="Stage 11 Pro",
-            bg=self.colors["sidebar"],
-            fg="#7990ac",
-            font=("Segoe UI", 9),
-            pady=16,
-        ).pack(fill="x")
 
     # vaadete loomine
     def _build_views(self):
