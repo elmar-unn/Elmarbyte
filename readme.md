@@ -122,9 +122,8 @@ Rakenduse keskmes on tabel **games**.
 ## How to run
 
 ### 1. Paigalda Python
-Veendu, et sul on arvutis olemas **Python 3** ja pillow, kui ei ole pip install pillow.
+Veendu, et sul on arvutis olemas **Python 3**.
 
 Kontroll:
 ```bash
-
 python --version

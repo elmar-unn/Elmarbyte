@@ -163,7 +163,51 @@ class LibraryView(ttk.Frame):
 
         # algandmed
         self.refresh()
+        # Epic AppName muutmine loetavamaks nimeks
+    def _prettify_epic_app_name(self, app_name: str) -> str:
+        # tühi kontroll
+        if not app_name:
+            return "Unknown Epic Game"
 
+        text = app_name.strip()
+
+        # asenda alakriipsud ja sidekriipsud tühikuga
+        text = text.replace("_", " ").replace("-", " ")
+
+        # lisa tühik camelCase / PascalCase vahele
+        pretty = []
+        for i, ch in enumerate(text):
+            if i > 0 and ch.isupper() and text[i - 1].islower():
+                pretty.append(" ")
+            pretty.append(ch)
+
+        text = "".join(pretty)
+
+        # mitmed tühikud üheks
+        text = " ".join(text.split())
+
+        # title case
+        return text.title()
+
+    # Epic mängu nähtava nime valik
+    def _get_epic_display_title(self, item: dict) -> str:
+        # eelista DisplayName välja
+        display_name = (item.get("DisplayName") or "").strip()
+        if display_name:
+            return display_name
+
+        # fallback CatalogItemId põhisele nimele pole ilus,
+        # seega kasuta pigem AppName välja
+        app_name = (item.get("AppName") or "").strip()
+        if app_name:
+            return self._prettify_epic_app_name(app_name)
+
+        # viimane fallback
+        install_location = (item.get("InstallLocation") or "").strip()
+        if install_location:
+            return Path(install_location).name or "Unknown Epic Game"
+
+        return "Unknown Epic Game"
     # ülariba
     def _build_header(self):
         header = ttk.Frame(self)
@@ -1244,43 +1288,57 @@ class LibraryView(ttk.Frame):
         messagebox.showinfo("Import Steam", f"Imporditud: {imported}\nVahele jäetud: {skipped}")
 
     # epic installide import
+    # epic installide import
     def import_epic_installs(self):
         # tüüpiline LauncherInstalled.dat asukoht
-        candidate = Path(os.environ.get("ALLUSERSPROFILE", r"C:\ProgramData")) / "Epic" / "UnrealEngineLauncher" / "LauncherInstalled.dat"
+        candidate = Path(
+            os.environ.get("ALLUSERSPROFILE", r"C:\ProgramData")
+        ) / "Epic" / "UnrealEngineLauncher" / "LauncherInstalled.dat"
 
+        # faili olemasolu kontroll
         if not candidate.exists():
             messagebox.showwarning("Import Epic", f"Faili ei leitud:\n{candidate}")
             return
 
+        # JSON lugemine
         try:
             data = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception as e:
             messagebox.showerror("Import Epic", f"JSON lugemine ebaõnnestus:\n{e}")
             return
 
+        # installide loetelu
         installation_list = data.get("InstallationList", [])
         imported = 0
         skipped = 0
 
         for item in installation_list:
-            # nimi AppName-ist või DisplayName-ist
-            title = item.get("DisplayName") or item.get("AppName") or ""
-            app_name = item.get("AppName") or ""
+            # loetav nimi
+            title = self._get_epic_display_title(item)
 
-            # tühi nimi
-            if not title:
+            # app nimi uri jaoks
+            app_name = (item.get("AppName") or "").strip()
+
+            # kui app_name puudub, ei saa launch uri teha
+            if not app_name:
                 skipped += 1
                 continue
 
-            # duplikaat
+            # duplikaatide vältimine
             if self._title_exists(title):
                 skipped += 1
                 continue
 
-            # buildi uri
-            epic_uri = f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true" if app_name else ""
+            # Epic launch URI
+            epic_uri = f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true"
 
-            # lisa mäng
+            # installikaust märkmetesse
+            install_location = (item.get("InstallLocation") or "").strip()
+            notes = "Imporditud Epic LauncherInstalled.dat failist."
+            if install_location:
+                notes += f"\nInstallLocation: {install_location}"
+
+            # lisa mäng andmebaasi
             self.db.add_game(
                 title=title,
                 platform="PC",
@@ -1291,10 +1349,11 @@ class LibraryView(ttk.Frame):
                 cover_path="",
                 launcher_type="epic_uri",
                 launcher_path=epic_uri,
-                notes="Imporditud Epic LauncherInstalled.dat failist.",
+                notes=notes,
             )
             imported += 1
 
+        # vaade uuesti laadida
         self.refresh()
         messagebox.showinfo("Import Epic", f"Imporditud: {imported}\nVahele jäetud: {skipped}")
 
