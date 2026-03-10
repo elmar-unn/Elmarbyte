@@ -3,34 +3,30 @@ from dataclasses import dataclass
 
 @dataclass
 class Game:
-    id: int | None
+    id: int
     title: str
-    platform_id: int
-    genre_id: int
+    platform: str
+    genre: str
     rating: int
     status: str
-    completed: int
-    notes: str
-    date_added: str
-    release_year: int | None = None
-    publisher: str = ''
-    cover_path: str = ''
-    favorite: int = 0
-
-
-@dataclass
-class PlaySession:
-    id: int | None
-    game_id: int
-    session_date: str
-    duration_minutes: int
+    favorite: int
+    cover_path: str
+    launcher_type: str
+    launcher_path: str
     notes: str
 
-
-@dataclass
-class WishlistItem:
-    id: int | None
-    title: str
-    platform_id: int
-    priority: str
-    added_at: str
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=row["id"],
+            title=row["title"],
+            platform=row["platform"],
+            genre=row["genre"],
+            rating=row["rating"],
+            status=row["status"],
+            favorite=row["favorite"],
+            cover_path=row["cover_path"] or "",
+            launcher_type=row["launcher_type"] or "file",
+            launcher_path=row["launcher_path"] or "",
+            notes=row["notes"] or "",
+        )

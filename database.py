@@ -1,467 +1,232 @@
-import csv
-import json
 import sqlite3
-from datetime import datetime
-from pathlib import Path
+from typing import Optional
 
-from models import Game, PlaySession, WishlistItem
-
-DEFAULT_DB_PATH = Path(__file__).with_name('gamevault.db')
+from models import Game
 
 
-class DatabaseManager:
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH):
-        self.db_path = Path(db_path)
-        self.conn = sqlite3.connect(self.db_path)
+class Database:
+    def __init__(self, path: str = "gamevault.db"):
+        self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute('PRAGMA foreign_keys = ON')
+        self.create_tables()
+        self.migrate_tables()
+        self.seed_if_empty()
 
-    def now_string(self) -> str:
-        return datetime.now().strftime('%Y-%m-%d %H:%M')
-
-    def today_string(self) -> str:
-        return datetime.now().strftime('%Y-%m-%d')
-
-    def initialize(self) -> None:
+    def create_tables(self):
         cur = self.conn.cursor()
-        cur.executescript(
-            '''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS platforms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
-            );
-
-            CREATE TABLE IF NOT EXISTS genres (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
-            );
-
-            CREATE TABLE IF NOT EXISTS games (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                platform_id INTEGER NOT NULL,
-                genre_id INTEGER NOT NULL,
-                rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 10),
-                status TEXT NOT NULL DEFAULT 'Backlog',
-                completed INTEGER NOT NULL DEFAULT 0,
-                notes TEXT NOT NULL DEFAULT '',
-                date_added TEXT NOT NULL,
-                release_year INTEGER,
-                publisher TEXT NOT NULL DEFAULT '',
-                cover_path TEXT NOT NULL DEFAULT '',
-                favorite INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (platform_id) REFERENCES platforms(id),
-                FOREIGN KEY (genre_id) REFERENCES genres(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS play_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_id INTEGER NOT NULL,
-                session_date TEXT NOT NULL,
-                duration_minutes INTEGER NOT NULL CHECK(duration_minutes > 0),
-                notes TEXT NOT NULL DEFAULT '',
-                FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS wishlist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                platform_id INTEGER NOT NULL,
-                priority TEXT NOT NULL DEFAULT 'Medium',
-                added_at TEXT NOT NULL,
-                FOREIGN KEY (platform_id) REFERENCES platforms(id)
-            );
-            '''
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            genre TEXT NOT NULL,
+            rating INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'Backlog',
+            favorite INTEGER NOT NULL DEFAULT 0,
+            cover_path TEXT DEFAULT '',
+            launcher_type TEXT DEFAULT 'file',
+            launcher_path TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
         )
+        """)
         self.conn.commit()
-        self._migrate_if_needed()
-        self.set_setting_default('theme', 'dark')
 
-    def _table_columns(self, table_name: str) -> set[str]:
-        rows = self.conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {row['name'] for row in rows}
+    def migrate_tables(self):
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(games)")
+        cols = [row["name"] for row in cur.fetchall()]
 
-    def _add_column_if_missing(self, table: str, column_sql: str, column_name: str) -> None:
-        if column_name not in self._table_columns(table):
-            self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column_sql}')
-            self.conn.commit()
+        if "launcher_path" not in cols:
+            cur.execute("ALTER TABLE games ADD COLUMN launcher_path TEXT DEFAULT ''")
 
-    def _migrate_if_needed(self) -> None:
-        cols = self._table_columns('games')
-        # stage1 legacy had plain platform/genre text columns
-        if 'platform' in cols:
-            legacy_rows = self.conn.execute('SELECT * FROM games').fetchall()
-            self.conn.execute('ALTER TABLE games RENAME TO games_stage1_backup')
-            self.conn.executescript(
-                '''
-                CREATE TABLE games (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    platform_id INTEGER NOT NULL,
-                    genre_id INTEGER NOT NULL,
-                    rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 10),
-                    status TEXT NOT NULL DEFAULT 'Backlog',
-                    completed INTEGER NOT NULL DEFAULT 0,
-                    notes TEXT NOT NULL DEFAULT '',
-                    date_added TEXT NOT NULL,
-                    release_year INTEGER,
-                    publisher TEXT NOT NULL DEFAULT '',
-                    cover_path TEXT NOT NULL DEFAULT '',
-                    favorite INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY (platform_id) REFERENCES platforms(id),
-                    FOREIGN KEY (genre_id) REFERENCES genres(id)
-                );
-                '''
-            )
-            for row in legacy_rows:
-                platform_id = self.ensure_platform(row['platform'])
-                genre_id = self.ensure_genre(row['genre'] or 'Other')
-                self.conn.execute(
-                    '''
-                    INSERT INTO games (title, platform_id, genre_id, rating, status, completed, notes, date_added)
-                    VALUES (?, ?, ?, ?, ?, ?, '', ?)
-                    ''',
-                    (
-                        row['title'],
-                        platform_id,
-                        genre_id,
-                        row['rating'] or 1,
-                        row['status'] or 'Backlog',
-                        row['completed'] or 0,
-                        row['date_added'] or self.now_string(),
-                    ),
-                )
-            self.conn.execute('DROP TABLE games_stage1_backup')
-            self.conn.commit()
+        if "launcher_type" not in cols:
+            cur.execute("ALTER TABLE games ADD COLUMN launcher_type TEXT DEFAULT 'file'")
+
+        if "notes" not in cols:
+            cur.execute("ALTER TABLE games ADD COLUMN notes TEXT DEFAULT ''")
+
+        self.conn.commit()
+
+    def seed_if_empty(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) AS count FROM games")
+        count = cur.fetchone()["count"]
+        if count > 0:
             return
 
-        self._add_column_if_missing('games', 'release_year INTEGER', 'release_year')
-        self._add_column_if_missing('games', "publisher TEXT NOT NULL DEFAULT ''", 'publisher')
-        self._add_column_if_missing('games', "cover_path TEXT NOT NULL DEFAULT ''", 'cover_path')
-        self._add_column_if_missing('games', 'favorite INTEGER NOT NULL DEFAULT 0', 'favorite')
+        samples = [
+            ("Elden Ring", "PC", "RPG", 10, "Completed", 1, "", "file", "", "Huge open-world action RPG."),
+            ("Hades", "PC", "Roguelike", 9, "Playing", 1, "", "file", "", "Fast runs and great voice acting."),
+            ("Cyberpunk 2077", "PC", "Action RPG", 8, "Backlog", 0, "", "file", "", "Need to finish Phantom Liberty too."),
+            ("Fortnite", "PC", "Shooter", 8, "Playing", 0, "", "epic", "", "Can be launched through Epic."),
+        ]
 
-    def set_setting_default(self, key: str, value: str) -> None:
-        self.conn.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, value))
-        self.conn.commit()
-
-    def get_setting(self, key: str, default: str = '') -> str:
-        row = self.conn.execute('SELECT value FROM settings WHERE key = ?', (key,)).fetchone()
-        return row['value'] if row else default
-
-    def set_setting(self, key: str, value: str) -> None:
-        self.conn.execute(
-            '''
-            INSERT INTO settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            ''',
-            (key, value),
+        cur.executemany("""
+        INSERT INTO games (
+            title, platform, genre, rating, status, favorite,
+            cover_path, launcher_type, launcher_path, notes
         )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, samples)
+
         self.conn.commit()
 
-    def seed_if_empty(self) -> None:
-        for platform in ['PC', 'PlayStation 5', 'Nintendo Switch', 'Xbox Series X/S', 'Mobile']:
-            self.ensure_platform(platform)
-        for genre in ['RPG', 'Roguelike', 'Sandbox', 'Action', 'Adventure', 'Strategy', 'Other']:
-            self.ensure_genre(genre)
-
-        if self.conn.execute('SELECT COUNT(*) FROM games').fetchone()[0] == 0:
-            samples = [
-                Game(None, 'Elden Ring', self.ensure_platform('PC'), self.ensure_genre('RPG'), 10, 'Completed', 1,
-                     'Massive open world and great bosses.', self.now_string(), 2022, 'FromSoftware', '', 1),
-                Game(None, 'Hades', self.ensure_platform('Nintendo Switch'), self.ensure_genre('Roguelike'), 9, 'Playing', 0,
-                     'Great for short sessions.', self.now_string(), 2020, 'Supergiant Games', '', 1),
-                Game(None, 'Minecraft', self.ensure_platform('PC'), self.ensure_genre('Sandbox'), 9, 'Backlog', 0,
-                     'Need to start a new survival world.', self.now_string(), 2011, 'Mojang', '', 0),
-            ]
-            for game in samples:
-                self.add_game(game)
-
-        if self.conn.execute('SELECT COUNT(*) FROM play_sessions').fetchone()[0] == 0:
-            ids = self.conn.execute('SELECT id FROM games ORDER BY id').fetchall()
-            if ids:
-                self.add_play_session(PlaySession(None, ids[0]['id'], self.today_string(), 90, 'Explored a new area.'))
-            if len(ids) > 1:
-                self.add_play_session(PlaySession(None, ids[1]['id'], self.today_string(), 45, 'One quick run.'))
-
-        if self.conn.execute('SELECT COUNT(*) FROM wishlist').fetchone()[0] == 0:
-            self.add_wishlist_item(WishlistItem(None, 'Hollow Knight: Silksong', self.ensure_platform('PC'), 'High', self.now_string()))
-
-    def ensure_platform(self, name: str) -> int:
-        name = (name or 'Unknown').strip()
+    def get_games(self, search="", platform="All", genre="All", status="All", favorites_only=False):
         cur = self.conn.cursor()
-        cur.execute('INSERT OR IGNORE INTO platforms (name) VALUES (?)', (name,))
-        self.conn.commit()
-        row = cur.execute('SELECT id FROM platforms WHERE name = ?', (name,)).fetchone()
-        return int(row['id'])
+        query = "SELECT * FROM games WHERE 1=1"
+        params = []
 
-    def ensure_genre(self, name: str) -> int:
-        name = (name or 'Other').strip()
+        if search.strip():
+            term = f"%{search.strip().lower()}%"
+            query += " AND (LOWER(title) LIKE ? OR LOWER(platform) LIKE ? OR LOWER(genre) LIKE ?)"
+            params.extend([term, term, term])
+
+        if platform != "All":
+            query += " AND platform = ?"
+            params.append(platform)
+
+        if genre != "All":
+            query += " AND genre = ?"
+            params.append(genre)
+
+        if status != "All":
+            query += " AND status = ?"
+            params.append(status)
+
+        if favorites_only:
+            query += " AND favorite = 1"
+
+        query += " ORDER BY title COLLATE NOCASE ASC"
+
+        cur.execute(query, params)
+        return [Game.from_row(row) for row in cur.fetchall()]
+
+    def get_game(self, game_id: int) -> Optional[Game]:
         cur = self.conn.cursor()
-        cur.execute('INSERT OR IGNORE INTO genres (name) VALUES (?)', (name,))
-        self.conn.commit()
-        row = cur.execute('SELECT id FROM genres WHERE name = ?', (name,)).fetchone()
-        return int(row['id'])
+        cur.execute("SELECT * FROM games WHERE id = ?", (game_id,))
+        row = cur.fetchone()
+        return Game.from_row(row) if row else None
 
-    def get_platforms(self) -> list[sqlite3.Row]:
-        return self.conn.execute('SELECT id, name FROM platforms ORDER BY name').fetchall()
-
-    def get_genres(self) -> list[sqlite3.Row]:
-        return self.conn.execute('SELECT id, name FROM genres ORDER BY name').fetchall()
-
-    def add_game(self, game: Game) -> None:
-        self.conn.execute(
-            '''
-            INSERT INTO games (title, platform_id, genre_id, rating, status, completed, notes, date_added, release_year, publisher, cover_path, favorite)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (
-                game.title, game.platform_id, game.genre_id, game.rating, game.status, game.completed,
-                game.notes, game.date_added, game.release_year, game.publisher, game.cover_path, game.favorite,
-            ),
-        )
-        self.conn.commit()
-
-    def update_game(self, game_id: int, game: Game) -> None:
-        self.conn.execute(
-            '''
-            UPDATE games
-            SET title = ?, platform_id = ?, genre_id = ?, rating = ?, status = ?, completed = ?, notes = ?,
-                release_year = ?, publisher = ?, cover_path = ?, favorite = ?
-            WHERE id = ?
-            ''',
-            (
-                game.title, game.platform_id, game.genre_id, game.rating, game.status, game.completed,
-                game.notes, game.release_year, game.publisher, game.cover_path, game.favorite, game_id,
-            ),
-        )
-        self.conn.commit()
-
-    def delete_game(self, game_id: int) -> None:
-        self.conn.execute('DELETE FROM games WHERE id = ?', (game_id,))
-        self.conn.commit()
-
-    def fetch_games(
+    def add_game(
         self,
-        search: str = '',
-        status_filter: str = 'All',
-        platform_filter: str = 'All',
-        genre_filter: str = 'All',
-        favorite_only: bool = False,
-        sort_by: str = 'Newest first',
-    ) -> list[sqlite3.Row]:
-        query = '''
-            SELECT g.*, p.name AS platform_name, ge.name AS genre_name,
-                   COALESCE(SUM(ps.duration_minutes), 0) AS total_minutes,
-                   COUNT(ps.id) AS session_count
-            FROM games g
-            JOIN platforms p ON p.id = g.platform_id
-            JOIN genres ge ON ge.id = g.genre_id
-            LEFT JOIN play_sessions ps ON ps.game_id = g.id
-            WHERE 1=1
-        '''
-        params: list[str | int] = []
-        search = search.strip()
-        if search:
-            wildcard = f'%{search}%'
-            query += ' AND (g.title LIKE ? OR p.name LIKE ? OR ge.name LIKE ? OR g.status LIKE ? OR g.notes LIKE ? OR g.publisher LIKE ?)'
-            params.extend([wildcard] * 6)
-        if status_filter != 'All':
-            query += ' AND g.status = ?'
-            params.append(status_filter)
-        if platform_filter != 'All':
-            query += ' AND p.name = ?'
-            params.append(platform_filter)
-        if genre_filter != 'All':
-            query += ' AND ge.name = ?'
-            params.append(genre_filter)
-        if favorite_only:
-            query += ' AND g.favorite = 1'
-        query += ' GROUP BY g.id '
-        order_map = {
-            'Newest first': 'g.date_added DESC, g.id DESC',
-            'Title A-Z': 'g.title COLLATE NOCASE ASC',
-            'Rating high-low': 'g.rating DESC, g.title COLLATE NOCASE ASC',
-            'Hours played': 'total_minutes DESC, g.title COLLATE NOCASE ASC',
-            'Release year': 'g.release_year DESC, g.title COLLATE NOCASE ASC',
-        }
-        query += f" ORDER BY {order_map.get(sort_by, order_map['Newest first'])}"
-        return self.conn.execute(query, params).fetchall()
-
-    def get_game_choices(self) -> list[sqlite3.Row]:
-        return self.conn.execute('SELECT id, title FROM games ORDER BY title').fetchall()
-
-    def get_game_details(self, game_id: int) -> sqlite3.Row | None:
-        return self.conn.execute(
-            '''
-            SELECT g.*, p.name AS platform_name, ge.name AS genre_name,
-                   COALESCE(SUM(ps.duration_minutes), 0) AS total_minutes,
-                   COUNT(ps.id) AS session_count,
-                   MAX(ps.session_date) AS last_session_date
-            FROM games g
-            JOIN platforms p ON p.id = g.platform_id
-            JOIN genres ge ON ge.id = g.genre_id
-            LEFT JOIN play_sessions ps ON ps.game_id = g.id
-            WHERE g.id = ?
-            GROUP BY g.id
-            ''',
-            (game_id,),
-        ).fetchone()
-
-    def add_play_session(self, session: PlaySession) -> None:
-        self.conn.execute(
-            'INSERT INTO play_sessions (game_id, session_date, duration_minutes, notes) VALUES (?, ?, ?, ?)',
-            (session.game_id, session.session_date, session.duration_minutes, session.notes),
-        )
-        self.conn.commit()
-
-    def fetch_play_sessions(self, game_id: int | None = None) -> list[sqlite3.Row]:
-        query = '''
-            SELECT ps.id, ps.game_id, g.title AS game_title, ps.session_date, ps.duration_minutes, ps.notes
-            FROM play_sessions ps
-            JOIN games g ON g.id = ps.game_id
-        '''
-        params: list[int] = []
-        if game_id is not None:
-            query += ' WHERE ps.game_id = ?'
-            params.append(game_id)
-        query += ' ORDER BY ps.session_date DESC, ps.id DESC'
-        return self.conn.execute(query, params).fetchall()
-
-    def get_sessions_for_game(self, game_id: int, limit: int = 8) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            '''
-            SELECT session_date, duration_minutes, notes
-            FROM play_sessions
-            WHERE game_id = ?
-            ORDER BY session_date DESC, id DESC
-            LIMIT ?
-            ''',
-            (game_id, limit),
-        ).fetchall()
-
-    def delete_play_session(self, session_id: int) -> None:
-        self.conn.execute('DELETE FROM play_sessions WHERE id = ?', (session_id,))
-        self.conn.commit()
-
-    def add_wishlist_item(self, item: WishlistItem) -> None:
-        self.conn.execute(
-            'INSERT INTO wishlist (title, platform_id, priority, added_at) VALUES (?, ?, ?, ?)',
-            (item.title, item.platform_id, item.priority, item.added_at),
-        )
-        self.conn.commit()
-
-    def fetch_wishlist(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            '''
-            SELECT w.id, w.title, p.name AS platform_name, w.priority, w.added_at
-            FROM wishlist w
-            JOIN platforms p ON p.id = w.platform_id
-            ORDER BY CASE w.priority WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END, w.id DESC
-            '''
-        ).fetchall()
-
-    def delete_wishlist_item(self, item_id: int) -> None:
-        self.conn.execute('DELETE FROM wishlist WHERE id = ?', (item_id,))
-        self.conn.commit()
-
-    def get_recent_sessions(self, limit: int = 8) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            '''
-            SELECT ps.session_date, g.title AS game_title, ps.duration_minutes
-            FROM play_sessions ps
-            JOIN games g ON g.id = ps.game_id
-            ORDER BY ps.session_date DESC, ps.id DESC
-            LIMIT ?
-            ''',
-            (limit,),
-        ).fetchall()
-
-    def get_status_breakdown(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            'SELECT status, COUNT(*) AS count FROM games GROUP BY status ORDER BY count DESC, status'
-        ).fetchall()
-
-    def get_platform_breakdown(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            '''
-            SELECT p.name AS platform_name, COUNT(*) AS count
-            FROM games g JOIN platforms p ON p.id = g.platform_id
-            GROUP BY p.id ORDER BY count DESC, platform_name
-            '''
-        ).fetchall()
-
-    def get_dashboard_stats(self) -> dict[str, str | int | float]:
+        title,
+        platform,
+        genre,
+        rating,
+        status,
+        favorite,
+        cover_path,
+        launcher_type,
+        launcher_path,
+        notes,
+    ):
         cur = self.conn.cursor()
-        total_games = cur.execute('SELECT COUNT(*) FROM games').fetchone()[0]
-        completed = cur.execute('SELECT COUNT(*) FROM games WHERE completed = 1').fetchone()[0]
-        backlog = cur.execute("SELECT COUNT(*) FROM games WHERE status = 'Backlog'").fetchone()[0]
-        favorites = cur.execute('SELECT COUNT(*) FROM games WHERE favorite = 1').fetchone()[0]
-        avg_rating = cur.execute('SELECT ROUND(AVG(rating), 1) FROM games').fetchone()[0] or '-'
-        total_minutes = cur.execute('SELECT COALESCE(SUM(duration_minutes), 0) FROM play_sessions').fetchone()[0]
-        wishlist_count = cur.execute('SELECT COUNT(*) FROM wishlist').fetchone()[0]
-        most_played = cur.execute(
-            '''
-            SELECT g.title, SUM(ps.duration_minutes) AS total_minutes
-            FROM play_sessions ps
-            JOIN games g ON g.id = ps.game_id
-            GROUP BY g.id ORDER BY total_minutes DESC LIMIT 1
-            '''
-        ).fetchone()
-        newest = cur.execute('SELECT title FROM games ORDER BY date_added DESC, id DESC LIMIT 1').fetchone()
-        completion_rate = round((completed / total_games) * 100, 1) if total_games else 0
+        cur.execute("""
+        INSERT INTO games (
+            title, platform, genre, rating, status, favorite,
+            cover_path, launcher_type, launcher_path, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            title, platform, genre, rating, status, favorite,
+            cover_path, launcher_type, launcher_path, notes
+        ))
+        self.conn.commit()
+
+    def update_game(
+        self,
+        game_id,
+        title,
+        platform,
+        genre,
+        rating,
+        status,
+        favorite,
+        cover_path,
+        launcher_type,
+        launcher_path,
+        notes,
+    ):
+        cur = self.conn.cursor()
+        cur.execute("""
+        UPDATE games
+        SET
+            title = ?,
+            platform = ?,
+            genre = ?,
+            rating = ?,
+            status = ?,
+            favorite = ?,
+            cover_path = ?,
+            launcher_type = ?,
+            launcher_path = ?,
+            notes = ?
+        WHERE id = ?
+        """, (
+            title, platform, genre, rating, status, favorite,
+            cover_path, launcher_type, launcher_path, notes, game_id
+        ))
+        self.conn.commit()
+
+    def delete_game(self, game_id: int):
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM games WHERE id = ?", (game_id,))
+        self.conn.commit()
+
+    def get_platforms(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT DISTINCT platform FROM games ORDER BY platform")
+        return [row["platform"] for row in cur.fetchall()]
+
+    def get_genres(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT DISTINCT genre FROM games ORDER BY genre")
+        return [row["genre"] for row in cur.fetchall()]
+
+    def get_statuses(self):
+        return ["Backlog", "Playing", "Completed", "Dropped"]
+
+    def get_stats(self):
+        cur = self.conn.cursor()
+
+        cur.execute("SELECT COUNT(*) AS count FROM games")
+        total = cur.fetchone()["count"]
+
+        cur.execute("SELECT COUNT(*) AS count FROM games WHERE status = 'Completed'")
+        completed = cur.fetchone()["count"]
+
+        cur.execute("SELECT COUNT(*) AS count FROM games WHERE status = 'Playing'")
+        playing = cur.fetchone()["count"]
+
+        cur.execute("SELECT COUNT(*) AS count FROM games WHERE favorite = 1")
+        favorites = cur.fetchone()["count"]
+
+        cur.execute("SELECT ROUND(AVG(rating), 1) AS avg_rating FROM games")
+        avg_rating = cur.fetchone()["avg_rating"] or 0
+
+        cur.execute("""
+        SELECT title, rating
+        FROM games
+        ORDER BY rating DESC, title ASC
+        LIMIT 1
+        """)
+        top = cur.fetchone()
+        top_game = f"{top['title']} ({top['rating']}/10)" if top else "-"
+
+        cur.execute("""
+        SELECT status, COUNT(*) AS count
+        FROM games
+        GROUP BY status
+        ORDER BY count DESC
+        """)
+        status_breakdown = [(row["status"], row["count"]) for row in cur.fetchall()]
+
         return {
-            'total_games': total_games,
-            'completed': completed,
-            'backlog': backlog,
-            'avg_rating': avg_rating,
-            'total_hours': round(total_minutes / 60, 1),
-            'wishlist_count': wishlist_count,
-            'most_played': most_played['title'] if most_played else '-',
-            'completion_rate': completion_rate,
-            'favorites': favorites,
-            'newest_game': newest['title'] if newest else '-',
+            "total": total,
+            "completed": completed,
+            "playing": playing,
+            "favorites": favorites,
+            "avg_rating": avg_rating,
+            "top_game": top_game,
+            "status_breakdown": status_breakdown,
         }
-
-    def export_library_csv(self, filepath: str | Path) -> None:
-        rows = self.fetch_games()
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['ID', 'Title', 'Platform', 'Genre', 'Rating', 'Status', 'Completed', 'Favorite', 'Sessions', 'Hours Played', 'Release Year', 'Publisher', 'Added', 'Notes', 'Cover Path'])
-            for row in rows:
-                writer.writerow([
-                    row['id'], row['title'], row['platform_name'], row['genre_name'], row['rating'], row['status'],
-                    'Yes' if row['completed'] else 'No', 'Yes' if row['favorite'] else 'No', row['session_count'], round(row['total_minutes'] / 60, 1),
-                    row['release_year'] or '', row['publisher'], row['date_added'], row['notes'], row['cover_path'],
-                ])
-
-    def export_library_json(self, filepath: str | Path) -> None:
-        rows = self.fetch_games(sort_by='Title A-Z')
-        payload = []
-        for row in rows:
-            payload.append({
-                'id': row['id'],
-                'title': row['title'],
-                'platform': row['platform_name'],
-                'genre': row['genre_name'],
-                'rating': row['rating'],
-                'status': row['status'],
-                'completed': bool(row['completed']),
-                'favorite': bool(row['favorite']),
-                'release_year': row['release_year'],
-                'publisher': row['publisher'],
-                'hours_played': round(row['total_minutes'] / 60, 1),
-                'sessions': row['session_count'],
-                'notes': row['notes'],
-                'cover_path': row['cover_path'],
-                'date_added': row['date_added'],
-            })
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
-    def close(self) -> None:
-        self.conn.close()
