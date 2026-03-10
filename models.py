@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Game:
+    # mängu andmemudel
     id: int
     title: str
     platform: str
@@ -17,6 +18,7 @@ class Game:
 
     @classmethod
     def from_row(cls, row):
+        # sqlite rea teisendus objektiks
         return cls(
             id=row["id"],
             title=row["title"],
@@ -26,7 +28,7 @@ class Game:
             status=row["status"],
             favorite=row["favorite"],
             cover_path=row["cover_path"] or "",
-            launcher_type=row["launcher_type"] or "file",
+            launcher_type=row["launcher_type"] or "local_file",
             launcher_path=row["launcher_path"] or "",
             notes=row["notes"] or "",
         )
