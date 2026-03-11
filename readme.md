@@ -127,7 +127,9 @@ Veendu, et sul on arvutis olemas **Python 3**.
 Kontroll:
 ```bash
 
-python --version
+python --version´´
+
 ### 2. Käivita script
 cd elmarbyte
 python main.py**.
+
