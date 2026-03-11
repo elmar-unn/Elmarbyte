@@ -129,7 +129,8 @@ Kontroll:
 
 python --version´´
 
-### 2. Käivita script
+2. Käivita script
 cd elmarbyte
-python main.py**.
+python main.py.
+
 
